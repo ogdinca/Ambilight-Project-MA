@@ -11,8 +11,7 @@ uint8_t * ledsRaw = (uint8_t *)leds;
 
 // A 'magic word' (along with LED count & checksum) precedes each block
 // of LED data; this assists the microcontroller in syncing up with the
-// host-side software and properly issuing the latch. The host software 
-// will need to generate a compatible header: immediately following the 
+// host-side software and properly issuing the latch. Immediately following the 
 // magic word are three bytes: a 16-bit count of the number of LEDs
 // (high byte first) followed by a simple checksum value (high byte XOR low
 // byte XOR 0x55). LED data follows, 3 bytes per LED, in order R, G, B,
