@@ -1,0 +1,167 @@
+#include "FastLED.h"
+#define NUM_LEDS 55
+#define BRIGHTNESS 255
+#define LED_TYPE WS2812B  
+#define COLOR_ORDER RGB      
+#define PIN_DATA 6       
+#define baudrate 128000
+const uint16_t SerialTimeout  = 60;      // time before LEDs are shut off if no data
+CRGB leds[NUM_LEDS];
+uint8_t * ledsRaw = (uint8_t *)leds;
+
+// A 'magic word' (along with LED count & checksum) precedes each block
+// of LED data; this assists the microcontroller in syncing up with the
+// host-side software and properly issuing the latch. The host software 
+// will need to generate a compatible header: immediately following the 
+// magic word are three bytes: a 16-bit count of the number of LEDs
+// (high byte first) followed by a simple checksum value (high byte XOR low
+// byte XOR 0x55). LED data follows, 3 bytes per LED, in order R, G, B,
+// where 0 = off and 255 = max brightness.
+
+const uint8_t magic[] = {'D','i','n','c','a'};
+#define MAGICSIZE  sizeof(magic)
+
+// Check values are header byte
+#define HICHECK    (MAGICSIZE)
+#define LOCHECK    (MAGICSIZE + 1)
+#define CHECKSUM   (MAGICSIZE + 2)
+enum processModes_t {Header, Data} mode = Header;
+int currByte; // current byte
+int outPos;  // current byte index in the LED array
+int bytesRemaining;  // set by checksum
+unsigned long t, lastByteTime, lastWordTime;
+
+void headerMode();
+void dataMode();
+void timeouts();
+
+
+#ifdef SERIAL_FLUSH
+  #undef SERIAL_FLUSH
+  #define SERIAL_FLUSH while(Serial.available() > 0) { Serial.read(); }
+#else
+  #define SERIAL_FLUSH
+#endif
+
+#ifdef DEBUG_LED
+  #define ON  1
+  #define OFF 0
+
+  #define D_LED(x) do {digitalWrite(DEBUG_LED, x);} while(0)
+#else
+  #define D_LED(x)
+#endif
+
+#ifdef DEBUG_FPS
+  #define D_FPS do {digitalWrite(DEBUG_FPS, HIGH); digitalWrite(DEBUG_FPS, LOW);} while (0)
+#else
+  #define D_FPS
+#endif
+
+
+void setup(){
+	FastLED.setBrightness(BRIGHTNESS);
+
+  // Initial RGB flash for testing
+  LEDS.showColor(CRGB(255, 0, 0));
+  delay(500);
+  LEDS.showColor(CRGB(0, 255, 0));
+  delay(500);
+  LEDS.showColor(CRGB(0, 0, 255));
+  delay(500);
+  LEDS.showColor(CRGB(0, 0, 0));
+
+  
+	Serial.begin(baudrate);
+	Serial.print("Dinca\n"); // Send initial magic word
+
+	lastByteTime = lastWordTime = millis(); // Set initial counters
+}
+
+void loop(){ 
+	t = millis(); // Save current time
+
+	// If there is new serial data
+	if((currByte = Serial.read()) >= 0){
+		lastByteTime = lastWordTime = t; // Reset timeout counters
+
+		switch(mode) {
+			case Header:
+				headerMode();
+				break;
+			case Data:
+				dataMode();
+				break;
+		}
+	}
+	else {
+		// No new data
+		timeouts();
+	}
+}
+
+void headerMode(){
+	static int headPos, hi, lo, chk;
+
+	if(headPos < MAGICSIZE){
+		// Check if magic word matches
+		if(currByte == magic[headPos]) {headPos++;}
+		else {headPos = 0;}
+	}
+	else{
+		// Magic word matches! Now verify checksum
+		switch(headPos){
+			case HICHECK:
+				hi = currByte;
+				headPos++;
+				break;
+			case LOCHECK:
+				lo = currByte;
+				headPos++;
+				break;
+			case CHECKSUM:
+				chk = currByte;
+				if(chk == (hi ^ lo ^ 0x55)) {
+					// Checksum looks valid. Get 16-bit LED count, add 1 and multiply by 3 for R,G,B
+					D_LED(1);
+					bytesRemaining = 3L * (256L * (long)hi + (long)lo + 1L);
+					outPos = 0;
+					memset(leds, 0, NUM_LEDS * sizeof(struct CRGB));
+					mode = Data;
+				}
+				headPos = 0; // Reset header position regardless of checksum result
+				break;
+		}
+	}
+}
+
+void dataMode(){
+	// If LED data is not full
+	if (outPos < sizeof(leds)){
+		ledsRaw[outPos++] = currByte; // Issue next byte
+	}
+	bytesRemaining--;
+ 
+	if(bytesRemaining == 0) {
+		mode = Header; // Begin next header search
+		FastLED.show();
+		D_FPS;
+		D_LED(0);
+		SERIAL_FLUSH;
+	}
+}
+
+void timeouts(){
+	if((t - lastWordTime) >= 1000) {
+		Serial.print("Dinca\n"); // Send magic word to host
+		lastWordTime = t; // Reset counter
+
+		// If no data received for an extended time, turn off all LEDs.
+		if(SerialTimeout != 0 && (t - lastByteTime) >= (uint32_t) SerialTimeout * 1000) {
+			memset(leds, 0, NUM_LEDS * sizeof(struct CRGB));
+			FastLED.show();
+			mode = Header;
+			lastByteTime = t; // Reset counter
+		}
+	}
+}
